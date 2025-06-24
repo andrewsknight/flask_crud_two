@@ -2,6 +2,7 @@ import openai
 import json
 import os
 import re
+import requests
 from dotenv import load_dotenv
 from config.settings import Config
 from services.tools import ToolManager
@@ -14,12 +15,13 @@ class OpenAIAgent:
         self.tool_manager = ToolManager()
         self.client = None
         
+        # URL base de tu API (ajustar según tu configuración)
+        self.api_base_url = "http://localhost:5000/api"
+        
         # Intentar inicializar OpenAI
         try:
-            # Cargar variables de entorno por si acaso
             load_dotenv()
             
-            # Intentar obtener API key de múltiples fuentes
             api_key = (
                 Config.OPENAI_API_KEY or 
                 os.getenv('OPENAI_API_KEY') or
@@ -29,7 +31,7 @@ class OpenAIAgent:
             if api_key and api_key.startswith('sk-'):
                 self.client = openai.OpenAI(api_key=api_key)
                 print("✅ OpenAI inicializado correctamente")
-                print(f"🔑 API Key: {api_key[:8]}...{api_key[-4:]}")  # Mostrar solo parte de la key
+                print(f"🔑 API Key: {api_key[:8]}...{api_key[-4:]}")
             else:
                 print("⚠️ OPENAI_API_KEY no encontrado o inválido")
                 print(f"🔍 Valor encontrado: {api_key}")
@@ -53,9 +55,7 @@ class OpenAIAgent:
         }
     
     def detectar_intencion_basica(self, mensaje_usuario):
-        """
-        Fallback básico para detectar intenciones sin OpenAI
-        """
+        """Fallback básico para detectar intenciones sin OpenAI"""
         mensaje = mensaje_usuario.lower()
         
         if any(word in mensaje for word in ['hola', 'hello', 'hi', 'buenos', 'buenas']):
@@ -80,15 +80,11 @@ class OpenAIAgent:
             return "desconocida"
 
     def detectar_intencion(self, mensaje_usuario):
-        """
-        Detecta la intención del usuario usando OpenAI (con fallback básico)
-        """
-        # Si OpenAI no está disponible, usar detección básica
+        """Detecta la intención del usuario usando OpenAI (con fallback básico)"""
         if not self.client:
             return self.detectar_intencion_basica(mensaje_usuario)
             
         try:
-            # Prompt para detectar intención
             system_prompt = f"""Eres un asistente que detecta intenciones en mensajes de usuario.
 
 Las intenciones disponibles son:
@@ -117,7 +113,6 @@ Ejemplos:
             
             intencion = response.choices[0].message.content.strip().lower()
             
-            # Validar que la intención esté en nuestro diccionario
             if intencion not in self.intenciones:
                 print(f"🔍 OpenAI devolvió: '{intencion}' - usando fallback básico")
                 return self.detectar_intencion_basica(mensaje_usuario)
@@ -130,9 +125,7 @@ Ejemplos:
             return self.detectar_intencion_basica(mensaje_usuario)
     
     def extraer_entidades_basico(self, mensaje_usuario, intencion):
-        """
-        Fallback básico para extraer entidades sin OpenAI
-        """
+        """Fallback básico para extraer entidades sin OpenAI"""
         entidades = {}
         
         # Extraer email
@@ -148,13 +141,23 @@ Ejemplos:
         if numeros and intencion in ['buscar_usuario', 'actualizar_usuario', 'eliminar_usuario']:
             entidades['id'] = int(numeros[0])
         
+        # Para crear usuario, intentar extraer nombre
+        if intencion == 'crear_usuario':
+            palabras = mensaje_usuario.split()
+            # Buscar posibles nombres (palabras que no son comandos)
+            nombres_posibles = []
+            for palabra in palabras:
+                if palabra.lower() not in ['crear', 'usuario', 'con', 'datos', 'estos', 'el', 'la', 'los', 'las', 'tu', 'crealo', 'puede', 'puedes']:
+                    if not re.match(r'^\d+$', palabra) and '@' not in palabra:
+                        nombres_posibles.append(palabra)
+            
+            if nombres_posibles:
+                entidades['nombre'] = nombres_posibles[0]
+        
         return entidades
 
     def extraer_entidades(self, mensaje_usuario, intencion):
-        """
-        Extrae entidades relevantes del mensaje según la intención
-        """
-        # Si OpenAI no está disponible, usar extracción básica
+        """Extrae entidades relevantes del mensaje según la intención"""
         if not self.client:
             return self.extraer_entidades_basico(mensaje_usuario, intencion)
             
@@ -165,7 +168,7 @@ La intención detectada es: {intencion}
 Devuelve SOLO un JSON con las entidades encontradas.
 
 Ejemplos según intención:
-- crear_usuario: {{"nombre": "Juan", "email": "juan@email.com"}}
+- crear_usuario: {{"nombre": "Juan", "email": "juan@email.com", "password": "123456"}}
 - buscar_usuario: {{"id": 123, "nombre": "Juan", "email": "juan@email.com"}}
 - enviar_email: {{"destinatario": "juan@email.com", "asunto": "Saludo"}}
 
@@ -193,10 +196,81 @@ Si no encuentras entidades, devuelve un JSON vacío: {{}}"""
             print(f"❌ Error con OpenAI en extracción, usando básico: {e}")
             return self.extraer_entidades_basico(mensaje_usuario, intencion)
     
+    # NUEVOS MÉTODOS PARA INTERACTUAR CON LA API
+    def crear_usuario_api(self, nombre, email, password):
+        """Crear usuario a través de la API"""
+        try:
+            data = {
+                "nombre": nombre,
+                "email": email,
+                "password": password
+            }
+            
+            response = requests.post(f"{self.api_base_url}/usuarios", json=data)
+            
+            if response.status_code == 201:
+                usuario = response.json()
+                return f"✅ Usuario creado exitosamente!\n📝 ID: {usuario.get('id', 'N/A')}\n👤 Nombre: {nombre}\n📧 Email: {email}"
+            else:
+                error_msg = response.json().get('error', 'Error desconocido')
+                return f"❌ Error al crear usuario: {error_msg}"
+                
+        except requests.exceptions.ConnectionError:
+            return "❌ Error de conexión: No se pudo conectar con la API. ¿Está el servidor corriendo?"
+        except Exception as e:
+            return f"❌ Error inesperado: {str(e)}"
+    
+    def listar_usuarios_api(self):
+        """Listar todos los usuarios a través de la API"""
+        try:
+            response = requests.get(f"{self.api_base_url}/usuarios")
+            
+            if response.status_code == 200:
+                usuarios = response.json()
+                if not usuarios:
+                    return "📝 No hay usuarios registrados."
+                
+                resultado = "📋 **Lista de Usuarios:**\n\n"
+                for usuario in usuarios:
+                    resultado += f"🆔 ID: {usuario.get('id', 'N/A')}\n"
+                    resultado += f"👤 Nombre: {usuario.get('nombre', 'N/A')}\n"
+                    resultado += f"📧 Email: {usuario.get('email', 'N/A')}\n"
+                    resultado += f"📅 Creado: {usuario.get('fecha_creacion', 'N/A')}\n\n"
+                
+                return resultado
+            else:
+                return f"❌ Error al obtener usuarios: {response.status_code}"
+                
+        except requests.exceptions.ConnectionError:
+            return "❌ Error de conexión: No se pudo conectar con la API."
+        except Exception as e:
+            return f"❌ Error inesperado: {str(e)}"
+    
+    def buscar_usuario_api(self, user_id):
+        """Buscar usuario por ID a través de la API"""
+        try:
+            response = requests.get(f"{self.api_base_url}/usuarios/{user_id}")
+            
+            if response.status_code == 200:
+                usuario = response.json()
+                resultado = "👤 **Usuario encontrado:**\n\n"
+                resultado += f"🆔 ID: {usuario.get('id', 'N/A')}\n"
+                resultado += f"👤 Nombre: {usuario.get('nombre', 'N/A')}\n"
+                resultado += f"📧 Email: {usuario.get('email', 'N/A')}\n"
+                resultado += f"📅 Creado: {usuario.get('fecha_creacion', 'N/A')}\n"
+                return resultado
+            elif response.status_code == 404:
+                return f"❌ Usuario con ID {user_id} no encontrado."
+            else:
+                return f"❌ Error al buscar usuario: {response.status_code}"
+                
+        except requests.exceptions.ConnectionError:
+            return "❌ Error de conexión: No se pudo conectar con la API."
+        except Exception as e:
+            return f"❌ Error inesperado: {str(e)}"
+    
     def procesar_mensaje(self, mensaje_usuario):
-        """
-        Procesa un mensaje completo: detecta intención, extrae entidades y ejecuta acción
-        """
+        """Procesa un mensaje completo: detecta intención, extrae entidades y ejecuta acción"""
         # Detectar intención
         intencion = self.detectar_intencion(mensaje_usuario)
         
@@ -213,9 +287,7 @@ Si no encuentras entidades, devuelve un JSON vacío: {{}}"""
         }
     
     def ejecutar_accion(self, intencion, entidades, mensaje_original):
-        """
-        Ejecuta la acción correspondiente según la intención detectada
-        """
+        """Ejecuta la acción correspondiente según la intención detectada"""
         if intencion == "saludo":
             return "¡Hola! 👋 ¿En qué puedo ayudarte hoy?"
         
@@ -229,13 +301,24 @@ Si no encuentras entidades, devuelve un JSON vacío: {{}}"""
                 return "Para enviar un email, necesito que me proporciones el destinatario."
         
         elif intencion == "crear_usuario":
-            return "Para crear un usuario, usa el endpoint POST /api/usuarios con los datos: nombre, email y password."
+            # Verificar si tenemos todos los datos necesarios
+            if "nombre" in entidades and "email" in entidades:
+                nombre = entidades["nombre"]
+                email = entidades["email"]
+                password = entidades.get("password", "123456")  # Password por defecto
+                
+                return self.crear_usuario_api(nombre, email, password)
+            else:
+                return "Para crear un usuario, necesito al menos el nombre y email. Ejemplo: 'Crear usuario Juan con email juan@test.com'"
         
         elif intencion == "listar_usuarios":
-            return "Para ver todos los usuarios, usa el endpoint GET /api/usuarios"
+            return self.listar_usuarios_api()
         
         elif intencion == "buscar_usuario":
-            return "Para buscar un usuario, usa el endpoint GET /api/usuarios/{id}"
+            if "id" in entidades:
+                return self.buscar_usuario_api(entidades["id"])
+            else:
+                return "Para buscar un usuario, necesito el ID. Ejemplo: 'Buscar usuario 123'"
         
         elif intencion == "actualizar_usuario":
             return "Para actualizar un usuario, usa el endpoint PUT /api/usuarios/{id}"
@@ -247,13 +330,10 @@ Si no encuentras entidades, devuelve un JSON vacío: {{}}"""
             return self.responder_pregunta_general(mensaje_original)
         
         else:
-            return "No entiendo tu solicitud. ¿Podrías ser más específico?"
+            return "No entiendo tu solicitud. ¿Podrías ser más específico? Puedo ayudarte a crear, listar o buscar usuarios."
     
     def responder_pregunta_general(self, pregunta):
-        """
-        Responde preguntas generales usando OpenAI (con fallback básico)
-        """
-        # Si OpenAI no está disponible, respuesta básica
+        """Responde preguntas generales usando OpenAI (con fallback básico)"""
         if not self.client:
             return "Soy un asistente para la API de gestión de usuarios. Puedo ayudarte con crear, listar, buscar, actualizar y eliminar usuarios, así como enviar emails. ¿En qué puedo ayudarte específicamente?"
             
